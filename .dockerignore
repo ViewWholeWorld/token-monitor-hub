@@ -1,0 +1,10 @@
+**
+!package.json
+!package-lock.json
+!upstream/
+!upstream/src/
+!upstream/src/hub/
+!upstream/src/hub/**
+!upstream/src/shared/
+!upstream/src/shared/**
+!upstream/LICENSE

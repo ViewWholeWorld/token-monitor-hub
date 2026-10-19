@@ -1,0 +1,12 @@
+{
+  "name": "token-monitor-node-hub",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Token Monitor Hub 的最小容器依赖",
+  "dependencies": {
+    "dotenv": "17.4.2"
+  },
+  "engines": {
+    "node": ">=22.15.0"
+  }
+}

@@ -1,0 +1,6 @@
+upstream/
+work/
+.env
+.env.*
+!.env.example
+node_modules/

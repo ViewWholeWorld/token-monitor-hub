@@ -1,0 +1,37 @@
+services:
+  hub:
+    image: ${HUB_IMAGE:?请填写已发布的 Hub 镜像}
+    restart: unless-stopped
+    init: true
+    user: "${HUB_UID:-1000}:${HUB_GID:-100}"
+    ports:
+      - "${HUB_BIND_IP:?请填写 NAS 的 Tailscale IPv4}:${HUB_PORT:-17321}:17321"
+    environment:
+      NODE_ENV: production
+      TOKEN_MONITOR_HOST: 0.0.0.0
+      TOKEN_MONITOR_PORT: "17321"
+      TOKEN_MONITOR_DATA_FILE: /data/devices.json
+      TOKEN_MONITOR_SECRET: ${TOKEN_MONITOR_SECRET:?请保留原同步密钥}
+      TOKEN_MONITOR_SYNC_SESSION_TITLES: ${TOKEN_MONITOR_SYNC_SESSION_TITLES:-0}
+    volumes:
+      - ${HUB_DATA_DIR:?请保留原持久化目录}:/data
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - "fetch('http://127.0.0.1:17321/api/health').then(async r=>{const h=await r.json();process.exit(r.ok&&h.ok&&h.secretRequired?0:1)}).catch(()=>process.exit(1))"
+      interval: 10s
+      timeout: 5s
+      start_period: 5s
+      retries: 3
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

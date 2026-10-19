@@ -1,0 +1,75 @@
+name: 构建并发布 Hub 镜像
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: 上游版本 tag、提交 SHA，或 latest（最新正式发布）
+        required: true
+        default: latest
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: publish-hub
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: 获取构建配置
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: 获取指定上游源码
+        id: source
+        env:
+          REQUESTED_REF: ${{ inputs.upstream_ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/prepare-source.sh
+      - name: 构建 Linux amd64 镜像
+        env:
+          SOURCE_REVISION: ${{ steps.source.outputs.revision }}
+        run: |
+          docker build --pull --platform linux/amd64 \
+            --build-arg SOURCE_REVISION="$SOURCE_REVISION" \
+            --build-arg BUILD_REPOSITORY="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --tag hub-candidate:ci .
+      - name: 在最终镜像中运行 Hub 测试
+        run: |
+          docker run --rm --user 1000:1000 --read-only \
+            --tmpfs /tmp:rw,size=64m,mode=1777 \
+            -v "$PWD/upstream/tests:/app/tests:ro" \
+            -v "$PWD/upstream/worker:/app/worker:ro" \
+            hub-candidate:ci node --test --test-reporter=spec 'tests/hub/*.test.js'
+      - name: 验证鉴权、SSE 和重启后持久化
+        run: bash scripts/smoke-image.sh hub-candidate:ci
+      - name: 发布已通过测试的镜像
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_REVISION: ${{ steps.source.outputs.revision }}
+          RESOLVED_REF: ${{ steps.source.outputs.ref }}
+        run: |
+          set -euo pipefail
+          IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
+          BUILD_TAG="build-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          printf '%s' "$GH_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          for TAG in "$BUILD_TAG" "sha-${SOURCE_REVISION:0:12}" latest; do
+            docker tag hub-candidate:ci "$IMAGE:$TAG"
+            docker push "$IMAGE:$TAG"
+          done
+          {
+            printf '## Hub 镜像已发布\n\n'
+            printf -- '- 上游版本：`%s`\n' "$RESOLVED_REF"
+            printf -- '- 上游提交：`%s`\n' "$SOURCE_REVISION"
+            printf -- '- 本次镜像：`%s:%s`\n' "$IMAGE" "$BUILD_TAG"
+            printf -- '- NAS 更新：`sh ./hub.sh update %s`\n' "$BUILD_TAG"
+            printf '\n所有发布标签都指向本次通过测试的同一镜像。\n'
+          } >> "$GITHUB_STEP_SUMMARY"
