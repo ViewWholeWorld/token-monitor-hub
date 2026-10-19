@@ -3,6 +3,8 @@ name: 构建并发布 Hub 镜像
 on:
   push:
     branches: [main]
+  schedule:
+    - cron: '17 * * * *'
   workflow_dispatch:
     inputs:
       upstream_ref:
@@ -10,6 +12,11 @@ on:
         required: true
         default: latest
         type: string
+      force_rebuild:
+        description: 即使该 Release 已成功发布，也重新构建
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -28,13 +35,24 @@ jobs:
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           persist-credentials: false
+      - name: 验证 Release 检查逻辑
+        run: node --test tests/release-check.test.cjs
+      - name: 检查上游正式 Release
+        id: release
+        env:
+          REQUESTED_REF: ${{ inputs.upstream_ref || 'latest' }}
+          FORCE_REBUILD: ${{ github.event_name == 'push' || inputs.force_rebuild == true }}
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/check-release.cjs
       - name: 获取指定上游源码
         id: source
+        if: steps.release.outputs.should_build == 'true'
         env:
-          REQUESTED_REF: ${{ inputs.upstream_ref }}
+          REQUESTED_REF: ${{ steps.release.outputs.ref }}
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/prepare-source.sh
       - name: 构建 Linux amd64 镜像
+        if: steps.release.outputs.should_build == 'true'
         env:
           SOURCE_REVISION: ${{ steps.source.outputs.revision }}
         run: |
@@ -43,6 +61,7 @@ jobs:
             --build-arg BUILD_REPOSITORY="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
             --tag hub-candidate:ci .
       - name: 在最终镜像中运行 Hub 测试
+        if: steps.release.outputs.should_build == 'true'
         run: |
           docker run --rm --user 1000:1000 --read-only \
             --tmpfs /tmp:rw,size=64m,mode=1777 \
@@ -50,12 +69,15 @@ jobs:
             -v "$PWD/upstream/worker:/app/worker:ro" \
             hub-candidate:ci node --test --test-reporter=spec 'tests/hub/*.test.js'
       - name: 验证鉴权、SSE 和重启后持久化
+        if: steps.release.outputs.should_build == 'true'
         run: bash scripts/smoke-image.sh hub-candidate:ci
       - name: 发布已通过测试的镜像
+        if: steps.release.outputs.should_build == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           SOURCE_REVISION: ${{ steps.source.outputs.revision }}
           RESOLVED_REF: ${{ steps.source.outputs.ref }}
+          RELEASE_MARKER: ${{ steps.release.outputs.marker }}
         run: |
           set -euo pipefail
           IMAGE="ghcr.io/${GITHUB_REPOSITORY,,}"
@@ -65,6 +87,11 @@ jobs:
             docker tag hub-candidate:ci "$IMAGE:$TAG"
             docker push "$IMAGE:$TAG"
           done
+          # 成功标记最后发布；前面任何构建、测试、推送失败都不会阻止下次重试。
+          if test -n "$RELEASE_MARKER"; then
+            docker tag hub-candidate:ci "$IMAGE:$RELEASE_MARKER"
+            docker push "$IMAGE:$RELEASE_MARKER"
+          fi
           {
             printf '## Hub 镜像已发布\n\n'
             printf -- '- 上游版本：`%s`\n' "$RESOLVED_REF"
